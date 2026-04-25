@@ -23,3 +23,5 @@ Feature backlog for the companion app. Roughly grouped by area, but order is not
 
 ## Table tools
 - **Enemy tracker?**
+
+Anything else?
