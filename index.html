@@ -1915,8 +1915,15 @@ const app = {
     if (!c) { el.innerHTML = '<p class="hint">No active character.</p>'; return; }
     c.spellsKnown = c.spellsKnown || [];
     const editingId = this._editingSpellId || null;
-    const cards = c.spellsKnown.map(s => this.renderSpellCard(s, editingId === s.id)).join('');
-    const emptyState = c.spellsKnown.length ? '' : `<div class="spell-empty">No spells yet. Tap <strong>+</strong> to build one.</div>`;
+    const buf = this._spellEditBuffer;
+    const cards = c.spellsKnown.map(s => {
+      const isEditing = editingId === s.id;
+      const source = (isEditing && buf && buf.id === s.id) ? buf : s;
+      return this.renderSpellCard(source, isEditing);
+    }).join('');
+    const newCard = (this._spellIsNew && buf) ? this.renderSpellCard(buf, true) : '';
+    const hasAny = c.spellsKnown.length || this._spellIsNew;
+    const emptyState = hasAny ? '' : `<div class="spell-empty">No spells yet. Tap <strong>+</strong> to build one.</div>`;
     el.innerHTML = `
       <div class="spells-header-row">
         <h1>Spells</h1>
@@ -1930,6 +1937,7 @@ const app = {
       </p>
       <div class="spell-list">
         ${cards}
+        ${newCard}
         ${emptyState}
       </div>
     `;
@@ -2338,8 +2346,9 @@ const app = {
       ${paramGroups || '<div class="hint">No parameters for this category.</div>'}
       <div class="spell-editor-actions">
         <div class="spell-editor-actions-primary">
-          <button class="primary" onclick="app.castSpell('${s.id}')">🎲 Cast (roll Spellcraft)</button>
-          <button onclick="app.closeSpellEditor()" title="Changes save automatically — tap outside to close too">Close</button>
+          <button class="primary" onclick="app.saveSpellChanges('${s.id}')">Save changes</button>
+          <button onclick="app.castSpell('${s.id}')" title="Roll Spellcraft with these picks — doesn't save your edits">🎲 Cast</button>
+          <button onclick="app.closeSpellEditor()" title="Discard unsaved changes">Cancel</button>
         </div>
         <button class="delete-btn${this._spellDeleteArmed === s.id ? ' armed' : ''}" data-delete-spell="${s.id}" title="Delete spell" aria-label="Delete spell">${this._spellDeleteArmed === s.id ? 'Tap to confirm' : '🗑'}</button>
       </div>
@@ -2350,19 +2359,35 @@ const app = {
     const c = this.active();
     c.spellsKnown = c.spellsKnown || [];
     const id = 'spell_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    c.spellsKnown.push({ id, name: '', picks: [] });
+    // New spells live in the buffer until Save changes — don't pollute the list yet.
+    this._spellEditBuffer = { id, name: '', picks: [] };
+    this._spellIsNew = true;
     this._editingSpellId = id;
     this._spellFocusCat = null;
-    this.save();
     this.renderSpells();
   },
   editSpell(id) {
+    const c = this.active();
+    const s = (c.spellsKnown || []).find(x => x.id === id);
+    if (!s) return;
     this._editingSpellId = id;
+    this._spellEditBuffer = this._cloneSpell(s);
+    this._spellIsNew = false;
     this._spellFocusCat = null;
     this.renderSpells();
   },
+  _cloneSpell(s) {
+    // Deep enough for our shape: { id, name, picks: [{catId,paramName,optIdx}] }
+    return {
+      id: s.id,
+      name: s.name || '',
+      picks: (s.picks || []).map(p => ({ ...p })),
+    };
+  },
   closeSpellEditor() {
     this._editingSpellId = null;
+    this._spellEditBuffer = null;
+    this._spellIsNew = false;
     this._spellFocusCat = null;
     this._spellDeleteArmed = null;
     if (this._spellDeleteTimer) { clearTimeout(this._spellDeleteTimer); this._spellDeleteTimer = null; }
@@ -2370,6 +2395,27 @@ const app = {
       document.removeEventListener('click', this._spellOutsideHandler, true);
       this._spellOutsideHandler = null;
     }
+    this.renderSpells();
+  },
+  saveSpellChanges(id) {
+    const c = this.active();
+    const buf = this._spellEditBuffer;
+    if (!buf || buf.id !== id) return;
+    c.spellsKnown = c.spellsKnown || [];
+    if (this._spellIsNew) {
+      c.spellsKnown.push(this._cloneSpell(buf));
+      this.toast('Spell saved.');
+    } else {
+      const idx = c.spellsKnown.findIndex(x => x.id === id);
+      if (idx === -1) return;
+      c.spellsKnown[idx] = this._cloneSpell(buf);
+      this.toast('Changes saved.');
+    }
+    this._editingSpellId = null;
+    this._spellEditBuffer = null;
+    this._spellIsNew = false;
+    this._spellFocusCat = null;
+    this.save();
     this.renderSpells();
   },
   deleteSpell(id) {
@@ -2380,12 +2426,17 @@ const app = {
       if (this._spellDeleteTimer) { clearTimeout(this._spellDeleteTimer); this._spellDeleteTimer = null; }
       this._spellDeleteArmed = null;
       const c = this.active();
-      if (!c.spellsKnown) return;
-      c.spellsKnown = c.spellsKnown.filter(s => s.id !== id);
+      const wasNew = this._spellIsNew && this._spellEditBuffer && this._spellEditBuffer.id === id;
+      if (!wasNew) {
+        if (!c.spellsKnown) return;
+        c.spellsKnown = c.spellsKnown.filter(s => s.id !== id);
+      }
       this._editingSpellId = null;
+      this._spellEditBuffer = null;
+      this._spellIsNew = false;
       this.save();
       this.renderSpells();
-      this.toast('Spell deleted.');
+      this.toast(wasNew ? 'Discarded new spell.' : 'Spell deleted.');
       return;
     }
     // First tap: arm, and auto-disarm after 3s.
@@ -2400,16 +2451,14 @@ const app = {
     this.renderSpells();
   },
   updateSpellName(id, value) {
-    const c = this.active();
-    const s = (c.spellsKnown || []).find(x => x.id === id);
-    if (!s) return;
-    s.name = value;
-    this.save();
+    // Writes to the edit buffer only. Committed on Save changes.
+    if (this._spellEditBuffer && this._spellEditBuffer.id === id) {
+      this._spellEditBuffer.name = value;
+    }
     // Don't re-render here - would lose focus on input
   },
   focusSpellCat(id, catId) {
-    const c = this.active();
-    const s = (c.spellsKnown || []).find(x => x.id === id);
+    const s = this._getSpellForEditor(id);
     if (s && (s.picks || []).length > 0) {
       const lockedCatId = s.picks[0].catId;
       if (catId !== lockedCatId) {
@@ -2427,19 +2476,22 @@ const app = {
     this._spellFocusCat = catId;
     this.renderSpells();
   },
-  clearSpellPicks(id) {
+  _getSpellForEditor(id) {
+    // Prefer buffer when editing; fall back to the saved spell.
+    if (this._spellEditBuffer && this._spellEditBuffer.id === id) return this._spellEditBuffer;
     const c = this.active();
-    const s = (c.spellsKnown || []).find(x => x.id === id);
+    return (c && c.spellsKnown || []).find(x => x.id === id);
+  },
+  clearSpellPicks(id) {
+    const s = this._getSpellForEditor(id);
     if (!s || !(s.picks || []).length) return;
     s.picks = [];
     this._spellFocusCat = null;
-    this.save();
     this.renderSpells();
     this.toast('Picks cleared. Pick a new category.');
   },
   toggleSpellParam(id, catId, paramName, optIdx) {
-    const c = this.active();
-    const s = (c.spellsKnown || []).find(x => x.id === id);
+    const s = this._getSpellForEditor(id);
     if (!s) return;
     s.picks = s.picks || [];
     // If the same param already has a pick in this category, replace it (radio behavior per param)
@@ -2452,7 +2504,6 @@ const app = {
     } else {
       s.picks.push({ catId, paramName, optIdx });
     }
-    this.save();
     this.renderSpells();
   },
   computeSpellDC(s) {
@@ -2498,7 +2549,7 @@ const app = {
   // ---------- cast flow ----------
   castSpell(id) {
     const c = this.active();
-    const s = (c.spellsKnown || []).find(x => x.id === id);
+    const s = this._getSpellForEditor(id) || (c.spellsKnown || []).find(x => x.id === id);
     if (!s) return;
     const dc = this.computeSpellDC(s);
     if (dc === 0) {
@@ -2536,7 +2587,7 @@ const app = {
     const st = this._spellCastState;
     if (!st) return;
     const c = this.active();
-    const s = (c.spellsKnown || []).find(x => x.id === st.id);
+    const s = this._getSpellForEditor(st.id) || (c.spellsKnown || []).find(x => x.id === st.id);
     const bonusTxt = st.bonusNum ? ` + ${st.bonusNum}` : '';
     const reservePart = st.useReserves > 0 ? ` + ${st.useReserves}\u00d7${st.reserveDie}` : '';
     this.showModal({
