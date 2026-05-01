@@ -444,6 +444,22 @@
     border: 1px solid rgba(56,165,100,0.35); font-family: var(--font-mono);
   }
   .effect-chip.warn { background: rgba(234,179,8,0.12); color: #fbbf24; border-color: rgba(234,179,8,0.3); }
+  /* effects editor (inside .edit-panel) */
+  .eff-block { align-items: flex-start; }
+  .eff-list { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+  .eff-row {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    padding: 6px; background: rgba(255,255,255,0.03); border: 1px solid #2a2538;
+    border-radius: 6px;
+  }
+  .eff-row select, .eff-row input {
+    background: #1a1724; border: 1px solid #2a2538; color: var(--text);
+    border-radius: 4px; padding: 4px 6px; font-size: 12px; min-width: 0;
+  }
+  .eff-row select { flex: 0 1 auto; }
+  .eff-row input { flex: 1 1 80px; min-width: 60px; }
+  .btn.small { padding: 4px 10px; font-size: 12px; }
+  .btn.danger.small { padding: 2px 8px; font-size: 14px; line-height: 1; }
   .bonus-item { color: var(--accent); font-size: 11px; margin-left: 4px; font-style: italic; }
   .skill-bonus-total { color: var(--accent); font-size: 11px; font-weight: 600; margin-left: 2px; }
   .stat-total { position: relative; cursor: default; }
@@ -960,9 +976,30 @@ const app = {
         : '';
       const uses = a.uses ? `<span class="chip tier">${this.escape(a.uses)}</span>` : '';
       const tier = a.tier ? `<span class="chip tier">Tier ${a.tier}</span>` : '';
-      return `<div class="item editable-item" onclick="app.startEdit('abilities', ${i})" title="Tap to edit">
-        <div class="item-name">${chips}<strong>${this.escape(a.name || '(unnamed)')}</strong>${tier}${uses}</div>
+      const effects = this.effectsFor(a);
+      const isEquippable = effects.length > 0;
+      const equipChipsHtml = effects.map(e => {
+        const label = (e.stat === 'initiativeDie')
+          ? `Init Die ${e.value}`
+          : e.stat === 'skill' ? `+${e.value} ${e.key || 'skill'}`
+          : e.stat === 'reserve' ? `+${e.value} ${e.key || ''} reserve`
+          : e.stat === 'note' || e.stat === 'status' ? this.escape(String(e.value || e.source || 'note'))
+          : `${e.op}${e.value} ${e.stat.replace(/([A-Z])/g,' $1').toLowerCase()}`;
+        return `<span class="effect-chip" title="${this.escape(e.source || '')}">${label}</span>`;
+      }).join('');
+      const equippedBadge = a.equipped ? `<span class="equip-chip">EQUIPPED</span>` : '';
+      const cls = 'item editable-item' + (isEquippable ? ' equippable' : '') + (a.equipped ? ' equipped' : '');
+      const equipHandlers = isEquippable
+        ? `onmousedown="app.startEquipPress(event, 'abilities', ${i})" onmouseup="app.cancelEquipPress()" onmouseleave="app.cancelEquipPress()" ontouchstart="app.startEquipPress(event, 'abilities', ${i})" ontouchend="app.cancelEquipPress()" ontouchcancel="app.cancelEquipPress()"`
+        : '';
+      const tapHint = isEquippable
+        ? `<div class="hint" style="font-size:10.5px; margin-top:2px;">Tap to edit · Long-press to ${a.equipped ? 'unequip' : 'equip'}</div>`
+        : '';
+      return `<div class="${cls}" ${equipHandlers} onclick="app.handleItemTap(event, 'abilities', ${i})">
+        <div class="item-name">${chips}<strong>${this.escape(a.name || '(unnamed)')}</strong>${tier}${uses}${equippedBadge}</div>
         ${a.description ? `<div class="item-desc">${this.escape(a.description)}</div>` : ''}
+        ${equipChipsHtml ? `<div style="margin-top:4px;">${equipChipsHtml}</div>` : ''}
+        ${tapHint}
       </div>`;
     }).join('');
     return `
@@ -985,6 +1022,7 @@ const app = {
       <div class="edit-row"><label>Uses</label><input id="ed-uses" value="${this.escape(a.uses || '')}" placeholder="e.g. 1/short rest"></div>
       <div class="edit-row"><label>Colors</label><input id="ed-colors" value="${this.escape(colorsStr)}" placeholder="e.g. RED, BLUE"></div>
       <div class="edit-row"><label>Description</label><textarea id="ed-desc" placeholder="What it does">${this.escape(a.description || '')}</textarea></div>
+      ${this.renderEffectsEditor(a, 'abilities', i)}
       <div class="edit-actions">
         <button class="btn primary" onclick="app.saveAbility(${i})">Save</button>
         <button class="btn" onclick="app.cancelEdit()">Cancel</button>
@@ -1064,6 +1102,66 @@ const app = {
     </div>`;
   },
 
+  // Inline editor for the item.effects array. Renders below the description in
+  // ability/inventory editors. Effects auto-save on change.
+  renderEffectsEditor(item, bucket, idx) {
+    const effects = Array.isArray(item.effects) ? item.effects : [];
+    const STATS = [
+      ['initiative',    'Initiative'],
+      ['initiativeDie', 'Initiative Die'],
+      ['hitBonus',      'Hit Bonus'],
+      ['damageBonus',   'Damage Bonus'],
+      ['healthResist',  'Health Resist'],
+      ['armor',         'Armor'],
+      ['hitDieRoll',    'Hit Die Roll (defense)'],
+      ['skill',         'Skill'],
+      ['reserve',       'Reserve'],
+      ['status',        'Status (note)'],
+      ['note',          'Free note'],
+    ];
+    const SKILL_KEYS = [
+      'might','agility','endurance','perception','knowledge','reasoning',
+      'awareness','empathy','presence','spellcraft','resist','control',
+    ];
+    const TREE_KEYS = ['physical','intellectual','emotional','magic'];
+    const OPS = ['+','-','='];
+    const rows = effects.map((e, ei) => {
+      const stat = e.stat || 'initiative';
+      const statOpts = STATS.map(([v,l]) =>
+        `<option value="${v}"${stat === v ? ' selected' : ''}>${l}</option>`).join('');
+      const opOpts = OPS.map(o =>
+        `<option value="${o}"${(e.op || '+') === o ? ' selected' : ''}>${o}</option>`).join('');
+      let keyField = '';
+      if (stat === 'skill') {
+        const opts = SKILL_KEYS.map(k =>
+          `<option value="${k}"${e.key === k ? ' selected' : ''}>${k}</option>`).join('');
+        keyField = `<select onchange="app.updateEffect('${bucket}', ${idx}, ${ei}, 'key', this.value)" title="Which skill"><option value="">— skill —</option>${opts}</select>`;
+      } else if (stat === 'reserve') {
+        const opts = TREE_KEYS.map(k =>
+          `<option value="${k}"${e.key === k ? ' selected' : ''}>${k}</option>`).join('');
+        keyField = `<select onchange="app.updateEffect('${bucket}', ${idx}, ${ei}, 'key', this.value)" title="Which reserve tree"><option value="">— tree —</option>${opts}</select>`;
+      }
+      const showOp = !(stat === 'note' || stat === 'status');
+      const valuePlaceholder = (stat === 'initiativeDie') ? 'd6'
+        : (stat === 'note' || stat === 'status') ? 'text…'
+        : 'value';
+      return `<div class="eff-row">
+        <select onchange="app.updateEffect('${bucket}', ${idx}, ${ei}, 'stat', this.value)">${statOpts}</select>
+        ${keyField}
+        ${showOp ? `<select onchange="app.updateEffect('${bucket}', ${idx}, ${ei}, 'op', this.value)">${opOpts}</select>` : ''}
+        <input type="text" value="${this.escape(String(e.value ?? ''))}" placeholder="${valuePlaceholder}"
+          oninput="app.updateEffect('${bucket}', ${idx}, ${ei}, 'value', this.value)">
+        <input type="text" value="${this.escape(e.source || '')}" placeholder="source"
+          oninput="app.updateEffect('${bucket}', ${idx}, ${ei}, 'source', this.value)">
+        <button class="btn danger small" onclick="app.removeEffect('${bucket}', ${idx}, ${ei})" title="Remove effect">×</button>
+      </div>`;
+    }).join('');
+    return `<div class="edit-row eff-block"><label>Effects</label><div class="eff-list">
+      ${rows || '<div class="hint" style="font-size:11px;">No effects yet.</div>'}
+      <button class="btn small" onclick="app.addEffect('${bucket}', ${idx})">+ Add effect</button>
+    </div></div>`;
+  },
+
   renderInventoryEditor(it, bucket, idx) {
     const isWeapon = bucket === 'weapons';
     const isArmor = bucket === 'armor';
@@ -1081,6 +1179,7 @@ const app = {
       <div class="edit-row"><label>Durability</label><input id="ed-durability" value="${this.escape(String(it.durability || ''))}" placeholder="e.g. 3"></div>
       <div class="edit-row"><label>Qty</label><input id="ed-qty" value="${this.escape(String(it.qty || ''))}" placeholder="e.g. 1"></div>
       <div class="edit-row"><label>Notes</label><textarea id="ed-notes" placeholder="Description / effects">${this.escape(it.notes || '')}</textarea></div>
+      ${this.renderEffectsEditor(it, bucket, idx)}
       <div class="edit-actions">
         <button class="btn primary" onclick="app.saveInventory('${bucket}', ${idx})">Save</button>
         <button class="btn" onclick="app.cancelEdit()">Cancel</button>
@@ -1179,15 +1278,46 @@ const app = {
     return out;
   },
 
-  // Get effects for an inventory item: override registry wins, else parse desc.
+  // Get effects for an item/ability/spell:
+  // 1) explicit item.effects array wins (user-defined, structured)
+  // 2) override registry by name
+  // 3) parse description as last resort
   effectsFor(item) {
-    if (!item || !item.name) return [];
+    if (!item) return [];
+    if (Array.isArray(item.effects) && item.effects.length) return item.effects;
+    if (!item.name) return [];
     const key = item.name.toLowerCase();
     if (this.EFFECT_OVERRIDES[key]) return this.EFFECT_OVERRIDES[key];
     return this.parseItemEffects(item);
   },
 
-  // Fold all equipped items into a derived stats object.
+  // Apply a list of effects to a base stats object (mutates base).
+  // sourceName = human label for breakdown UI.
+  _applyEffects(base, effects, sourceName) {
+    for (const e of effects) {
+      base.breakdown.push({ itemName: sourceName, ...e });
+      switch (e.stat) {
+        case 'initiative':    if (e.op === '+') base.initiative += +e.value; break;
+        case 'initiativeDie': if (e.op === '=') base.initiativeDie = e.value; break;
+        case 'hitBonus':      if (e.op === '+') base.hitBonus    += +e.value; break;
+        case 'damageBonus':   if (e.op === '+') base.damageBonus += +e.value; break;
+        case 'healthResist':  if (e.op === '+') base.healthResist+= +e.value; break;
+        case 'armor':         if (e.op === '+') base.armor       += +e.value; break;
+        case 'hitDieRoll':    if (e.op === '+') base.hitDieRoll  += +e.value; break;
+        case 'skill': {
+          if (e.op === '+') base.skillBonuses[e.key] = (base.skillBonuses[e.key] || 0) + +e.value;
+          break;
+        }
+        case 'reserve': {
+          if (e.op === '+') base.reserveBonuses[e.key] = (base.reserveBonuses[e.key] || 0) + +e.value;
+          break;
+        }
+        // 'note' / 'status' / unknown: not auto-applied, but show in breakdown
+      }
+    }
+  },
+
+  // Fold all equipped items + equipped abilities into a derived stats object.
   // Raw character data is never mutated.
   computedStats(c) {
     const base = {
@@ -1197,36 +1327,28 @@ const app = {
       damageBonus: 0,
       healthResist: 0,
       armor: 0,
+      hitDieRoll: 0,       // bonus added to defensive Hit Die roll total
       skillBonuses: {},    // skillKey -> summed numeric bonus
       reserveBonuses: {},  // treeId  -> summed numeric bonus
       breakdown: [],       // [{itemName, stat, op, value, source}]
     };
-    if (!c || !c.inventory) return base;
-    const allItems = []
-      .concat(c.inventory.weapons || [])
-      .concat(c.inventory.armor   || [])
-      .concat(c.inventory.gear    || []);
-    for (const it of allItems) {
-      if (!it.equipped) continue;
-      const effects = this.effectsFor(it);
-      for (const e of effects) {
-        base.breakdown.push({itemName: it.name, ...e});
-        switch (e.stat) {
-          case 'initiative':    if (e.op === '+') base.initiative += +e.value; break;
-          case 'initiativeDie': if (e.op === '=') base.initiativeDie = e.value; break;
-          case 'hitBonus':      if (e.op === '+') base.hitBonus    += +e.value; break;
-          case 'damageBonus':   if (e.op === '+') base.damageBonus += +e.value; break;
-          case 'healthResist':  if (e.op === '+') base.healthResist+= +e.value; break;
-          case 'armor':         if (e.op === '+') base.armor       += +e.value; break;
-          case 'skill': {
-            if (e.op === '+') base.skillBonuses[e.key] = (base.skillBonuses[e.key] || 0) + +e.value;
-            break;
-          }
-          case 'reserve': {
-            if (e.op === '+') base.reserveBonuses[e.key] = (base.reserveBonuses[e.key] || 0) + +e.value;
-            break;
-          }
-        }
+    if (!c) return base;
+    // Equipped inventory items
+    if (c.inventory) {
+      const allItems = []
+        .concat(c.inventory.weapons || [])
+        .concat(c.inventory.armor   || [])
+        .concat(c.inventory.gear    || []);
+      for (const it of allItems) {
+        if (!it.equipped) continue;
+        this._applyEffects(base, this.effectsFor(it), it.name);
+      }
+    }
+    // Equipped abilities (passive effects that are "on" while equipped)
+    if (Array.isArray(c.abilities)) {
+      for (const a of c.abilities) {
+        if (!a.equipped) continue;
+        this._applyEffects(base, this.effectsFor(a), a.name || '(ability)');
       }
     }
     return base;
@@ -1333,6 +1455,54 @@ const app = {
     this._editing = null;
     this.renderSheet();
   },
+
+  // ---------- effect mutation helpers ----------
+  // Resolves a (bucket, idx) pair to the underlying object on the active character.
+  // Buckets: 'abilities' | 'weapons' | 'armor' | 'gear'
+  _resolveTarget(bucket, idx) {
+    const c = this.active();
+    if (!c) return null;
+    if (bucket === 'abilities') {
+      return (c.abilities && c.abilities[idx]) || null;
+    }
+    return (c.inventory && c.inventory[bucket] && c.inventory[bucket][idx]) || null;
+  },
+  addEffect(bucket, idx) {
+    const target = this._resolveTarget(bucket, idx);
+    if (!target) return;
+    target.effects = target.effects || [];
+    target.effects.push({ stat: 'initiative', op: '+', value: 1, source: '' });
+    this.save();
+    this.renderSheet();
+  },
+  removeEffect(bucket, idx, eIdx) {
+    const target = this._resolveTarget(bucket, idx);
+    if (!target || !Array.isArray(target.effects)) return;
+    target.effects.splice(eIdx, 1);
+    if (target.effects.length === 0) delete target.effects;
+    this.save();
+    this.renderSheet();
+  },
+  updateEffect(bucket, idx, eIdx, field, value) {
+    const target = this._resolveTarget(bucket, idx);
+    if (!target || !Array.isArray(target.effects) || !target.effects[eIdx]) return;
+    const e = target.effects[eIdx];
+    // numeric coercion for value when stat expects a number
+    if (field === 'value' && e.stat !== 'initiativeDie' && e.stat !== 'note' && e.stat !== 'status') {
+      const n = +value;
+      e.value = isNaN(n) ? value : n;
+    } else {
+      e[field] = value;
+    }
+    // when changing stat, reset key if the new stat doesn't use one
+    if (field === 'stat' && value !== 'skill' && value !== 'reserve') {
+      delete e.key;
+    }
+    this.save();
+    // Re-render only when the stat changes (to show/hide the key dropdown)
+    if (field === 'stat') this.renderSheet();
+  },
+
   addEntry(bucket) {
     const c = this.active();
     if (bucket === 'abilities') {
@@ -1538,24 +1708,24 @@ const app = {
     input.addEventListener('blur', commit);
   },
   toggleEquip(bucket, idx) {
-    const c = this.active();
-    const arr = c.inventory?.[bucket];
-    if (!arr || !arr[idx]) return;
-    const it = arr[idx];
-    it.equipped = !it.equipped;
+    const target = this._resolveTarget(bucket, idx);
+    if (!target) return;
+    target.equipped = !target.equipped;
     this.save();
     this.renderSheet();
-    const effects = this.effectsFor(it);
-    if (it.equipped && effects.length) {
+    const effects = this.effectsFor(target);
+    const label = target.name || (bucket === 'abilities' ? 'ability' : 'item');
+    if (target.equipped && effects.length) {
       const summary = effects.map(e =>
         e.stat === 'initiativeDie' ? `Init Die -> ${e.value}` :
+        e.stat === 'note' || e.stat === 'status' ? (e.value || e.source || 'note') :
         `${e.op}${e.value} ${e.stat}`
       ).join(', ');
-      this.toast(`Equipped ${it.name}: ${summary}`);
-    } else if (it.equipped) {
-      this.toast(`Equipped ${it.name}.`);
+      this.toast(`Equipped ${label}: ${summary}`);
+    } else if (target.equipped) {
+      this.toast(`Equipped ${label}.`);
     } else {
-      this.toast(`Unequipped ${it.name}.`);
+      this.toast(`Unequipped ${label}.`);
     }
   },
 
